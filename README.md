@@ -1,228 +1,135 @@
-library IEEE;
-use IEEE.STD_LOGIC_1164.ALL;
-use IEEE.NUMERIC_STD.ALL;
+This is a VHDL-based RTL design of a smart traffic signal controller using a Finite State Machine (FSM).
+*  What the system actually does (clear explanation)
+ Vehicle-based control
+veh_ns → vehicle detected on North-South road
+veh_ew → vehicle detected on East-West road
 
-entity traffic_fsm is
-    generic (
-        TICK_HZ     : integer := 10;
-        MAIN_IS_NS  : integer := 1
-    );
-    port (
-        clk, rst_n      : in  std_logic;
-        tick            : in  std_logic;
-        veh_ns, veh_ew  : in  std_logic;
-        ped_pulse       : in  std_logic;
-        emergency       : in  std_logic;
-        night_mode      : in  std_logic;
+Signals change based on traffic presence, not just fixed timing.
 
-        ns_g, ns_y, ns_r : out std_logic;
-        ew_g, ew_y, ew_r : out std_logic;
-        ped_walk, ped_dontwalk : out std_logic
-    );
-end entity;
+Pedestrian crossing
+ped_pulse → button press
+Internally stored as ped_req_latched
 
-architecture rtl of traffic_fsm is
+ Once pressed:
+System guarantees a walk phase
+Even if signal is busy → request is not lost
+ Emergency handling
+emergency = 1
 
-    type state_t is (
-        S_NS_G, S_NS_Y, S_ALL_RED1,
-        S_EW_G, S_EW_Y, S_ALL_RED2,
-        S_PED_WALK, S_PED_CLEAR,
-        S_EMERG_ALL_RED, S_NIGHT_FLASH
-    );
+ Immediate action:
 
-    signal state, next_state : state_t;
+All signals → RED
+Traffic stops instantly
+ Night mode
+night_mode = 1
 
-    signal ped_req_latched : std_logic := '0';
+ Changes behavior:
 
-    -- Timer signals
-    signal timer_count  : integer := 0;
-    signal timer_limit  : integer := 0;
-    signal timer_start  : std_logic := '0';
-    signal timer_done   : std_logic := '0';
-    signal timer_active : std_logic := '0';
+No normal cycle
+Lights blink (yellow/red) instead.
+The system moves through states like this:
 
-    -- Time constants (seconds)
-    constant T_GREEN_MIN : integer := 5 * TICK_HZ;
-    constant T_YELLOW    : integer := 2 * TICK_HZ;
-    constant T_ALLRED    : integer := 1 * TICK_HZ;
-    constant T_WALK      : integer := 5 * TICK_HZ;
+NS Green → NS Yellow → All Red →
+EW Green → EW Yellow → All Red →
+(Pedestrian if requested) →
+Repeat
+* Timing mechanism (important interview point)
 
-begin
+Instead of delays, it uses:
 
---------------------------------------------------
--- Pedestrian latch
---------------------------------------------------
-process(clk, rst_n)
-begin
-    if rst_n = '0' then
-        ped_req_latched <= '0';
-    elsif rising_edge(clk) then
-        if ped_pulse = '1' then
-            ped_req_latched <= '1';
-        elsif state = S_PED_CLEAR then
-            ped_req_latched <= '0';
-        end if;
-    end if;
-end process;
+tick → slow timing pulse
+Internal counter → timer_count
+timer_limit → defines duration
 
---------------------------------------------------
--- Timer Process (FIXED)
---------------------------------------------------
-process(clk, rst_n)
-begin
-    if rst_n = '0' then
-        timer_count  <= 0;
-        timer_active <= '0';
-        timer_done   <= '0';
-    elsif rising_edge(clk) then
-        timer_done <= '0';
+ Example:
 
-        if timer_start = '1' then
-            timer_count  <= 0;
-            timer_active <= '1';
-        elsif tick = '1' and timer_active = '1' then
-            if timer_count >= timer_limit then
-                timer_active <= '0';
-                timer_done   <= '1';
-            else
-                timer_count <= timer_count + 1;
-            end if;
-        end if;
-    end if;
-end process;
+Green = 5 sec
+Yellow = 2 sec
+All Red = 1 sec
 
---------------------------------------------------
--- State Register
---------------------------------------------------
-process(clk, rst_n)
-begin
-    if rst_n = '0' then
-        state <= S_NS_G;
-    elsif rising_edge(clk) then
-        if emergency = '1' then
-            state <= S_EMERG_ALL_RED;
-        elsif night_mode = '1' then
-            state <= S_NIGHT_FLASH;
-        else
-            state <= next_state;
-        end if;
-    end if;
-end process;
+This makes it:
+✔ Synthesizable
+✔ Hardware-accurate
+* Main blocks in your code
+1. Pedestrian Latch
 
---------------------------------------------------
--- Next State Logic + Outputs
---------------------------------------------------
-process(state, timer_done, veh_ns, veh_ew, ped_req_latched)
-begin
-    -- defaults
-    next_state <= state;
-    timer_start <= '0';
-    timer_limit <= 0;
+Stores button press:
 
-    ns_g <= '0'; ns_y <= '0'; ns_r <= '0';
-    ew_g <= '0'; ew_y <= '0'; ew_r <= '0';
-    ped_walk <= '0'; ped_dontwalk <= '0';
+if ped_pulse = '1' → ped_req_latched = '1'
 
-    case state is
+ Ensures:
 
-    when S_NS_G =>
-        ns_g <= '1'; ew_r <= '1'; ped_dontwalk <= '1';
-        timer_limit <= T_GREEN_MIN;
-        timer_start <= not timer_active;
+No missed pedestrian request
+2. Timer Block
 
-        if timer_done = '1' and (veh_ew = '1' or ped_req_latched = '1') then
-            next_state <= S_NS_Y;
-        end if;
+Counts ticks:
 
-    when S_NS_Y =>
-        ns_y <= '1'; ew_r <= '1'; ped_dontwalk <= '1';
-        timer_limit <= T_YELLOW;
-        timer_start <= not timer_active;
+Starts when timer_start = 1
+Ends when timer_done = 1
 
-        if timer_done = '1' then
-            next_state <= S_ALL_RED1;
-        end if;
+ Controls duration of each signal
 
-    when S_ALL_RED1 =>
-        ns_r <= '1'; ew_r <= '1'; ped_dontwalk <= '1';
-        timer_limit <= T_ALLRED;
-        timer_start <= not timer_active;
+3. State Register
+state <= next_state;
 
-        if timer_done = '1' then
-            if ped_req_latched = '1' then
-                next_state <= S_PED_WALK;
-            else
-                next_state <= S_EW_G;
-            end if;
-        end if;
+ Handles:
 
-    when S_EW_G =>
-        ew_g <= '1'; ns_r <= '1'; ped_dontwalk <= '1';
-        timer_limit <= T_GREEN_MIN;
-        timer_start <= not timer_active;
+Normal transitions
+Emergency override
+Night mode override
+4. Next-State Logic (Brain of system)
 
-        if timer_done = '1' and (veh_ns = '1' or ped_req_latched = '1') then
-            next_state <= S_EW_Y;
-        end if;
+This decides:
 
-    when S_EW_Y =>
-        ew_y <= '1'; ns_r <= '1'; ped_dontwalk <= '1';
-        timer_limit <= T_YELLOW;
-        timer_start <= not timer_active;
+Which state comes next
+When to change signals
+ 6. What outputs it generates
 
-        if timer_done = '1' then
-            next_state <= S_ALL_RED2;
-        end if;
+These are digital signals (1-bit each) — meant to drive LEDs or GPIO pins.
 
-    when S_ALL_RED2 =>
-        ns_r <= '1'; ew_r <= '1'; ped_dontwalk <= '1';
-        timer_limit <= T_ALLRED;
-        timer_start <= not timer_active;
+Traffic Lights (Two Roads)
+North-South Road
+ns_g → Green light
+ns_y → Yellow light
+ns_r → Red light
+East-West Road
+ew_g → Green
+ew_y → Yellow
+ew_r → Red
+ Pedestrian Signals
+ped_walk → WALK signal
+ped_dontwalk → STOP signal
+7. Example Output Behavior
+Normal case:
+NS: Green
+EW: Red
+Ped: Don’t Walk
 
-        if timer_done = '1' then
-            if ped_req_latched = '1' then
-                next_state <= S_PED_WALK;
-            else
-                next_state <= S_NS_G;
-            end if;
-        end if;
+Then:
 
-    when S_PED_WALK =>
-        ns_r <= '1'; ew_r <= '1'; ped_walk <= '1';
-        timer_limit <= T_WALK;
-        timer_start <= not timer_active;
+NS: Yellow
+EW: Red
 
-        if timer_done = '1' then
-            next_state <= S_PED_CLEAR;
-        end if;
+Then:
 
-    when S_PED_CLEAR =>
-        ns_r <= '1'; ew_r <= '1'; ped_dontwalk <= '1';
-        timer_limit <= T_ALLRED;
-        timer_start <= not timer_active;
+NS: Red
+EW: Green
+Pedestrian request:
+All Red
+Ped: WALK
+Emergency:
+NS: Red
+EW: Red
+Ped: Don’t Walk
+Night mode:
+Blinking Yellow (main road)
+Blinking Red (side road)
+8. What makes this design strong (say this!)
 
-        if timer_done = '1' then
-            next_state <= S_NS_G;
-        end if;
+ In interview, highlight this:
 
-    when S_EMERG_ALL_RED =>
-        ns_r <= '1'; ew_r <= '1'; ped_dontwalk <= '1';
-
-    when S_NIGHT_FLASH =>
-        ped_dontwalk <= '1';
-
-        if MAIN_IS_NS = 1 then
-            ns_y <= tick;
-            ew_r <= tick;
-        else
-            ew_y <= tick;
-            ns_r <= tick;
-        end if;
-
-    when others =>
-        next_state <= S_NS_G;
-
-    end case;
-end process;
-
-end architecture;
+Uses FSM for deterministic control
+Implements real-time timing using tick-based counter
+Handles asynchronous events (pedestrian, emergency)
+Includes mode-based operation (normal + night)
+Designed at RTL level → synthesizable on FPGA
